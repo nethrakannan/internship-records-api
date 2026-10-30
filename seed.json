@@ -1,0 +1,23 @@
+[
+  {
+    "company": "ABC Technologies",
+    "role": "Web Developer",
+    "location": "Remote",
+    "stipend": 5000,
+    "duration": "1 month"
+  },
+  {
+    "company": "XYZ Solutions",
+    "role": "Frontend Developer",
+    "location": "Remote",
+    "stipend": 8000,
+    "duration": "2 months"
+  },
+  {
+    "company": "Tech India",
+    "role": "Data Analyst",
+    "location": "Chennai",
+    "stipend": 6000,
+    "duration": "3 months"
+  }
+]
