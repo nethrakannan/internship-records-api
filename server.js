@@ -1,546 +1,471 @@
 
 const express = require("express");
+const cors = require("cors");
 const Database = require("better-sqlite3");
 
 const app = express();
-const db = new Database("internships.db");
-
 const PORT = process.env.PORT || 3000;
 
-// ========================================
-// SECURITY: CORS
-// ========================================
+// -------------------- BASIC CONFIGURATION --------------------
 
-const allowedOrigin = "https://nethrakannan.github.io";
-
-app.use((req, res, next) => {
-    res.setHeader("Vary", "Origin");
-
-    if (req.headers.origin === allowedOrigin) {
-        res.setHeader("Access-Control-Allow-Origin", allowedOrigin);
-    }
-
-    res.setHeader(
-        "Access-Control-Allow-Methods",
-        "GET, POST, PUT, DELETE, OPTIONS"
-    );
-
-    res.setHeader(
-        "Access-Control-Allow-Headers",
-        "Content-Type, Authorization"
-    );
-
-    if (req.method === "OPTIONS") {
-        return res.sendStatus(204);
-    }
-
-    next();
-});
-
-// ========================================
-// SECURITY: HTTP HEADERS
-// ========================================
-
-app.use((req, res, next) => {
-    res.setHeader("X-Content-Type-Options", "nosniff");
-    res.setHeader("X-Frame-Options", "DENY");
-    res.setHeader("Referrer-Policy", "no-referrer");
-    res.setHeader("X-XSS-Protection", "0");
-
-    next();
-});
-
-// ========================================
-// SECURITY: BASIC RATE LIMITING
-// ========================================
-
-const requestCounts = new Map();
-
-app.use((req, res, next) => {
-    const ip = req.ip;
-    const now = Date.now();
-    const windowTime = 15 * 60 * 1000;
-    const maxRequests = 100;
-
-    let userRequests = requestCounts.get(ip);
-
-    if (!userRequests || now - userRequests.start > windowTime) {
-        userRequests = {
-            start: now,
-            count: 0
-        };
-    }
-
-    userRequests.count++;
-
-    requestCounts.set(ip, userRequests);
-
-    if (userRequests.count > maxRequests) {
-        return res.status(429).json({
-            success: false,
-            error: "Too many requests. Please try again later."
-        });
-    }
-
-    next();
-});
-
-// ========================================
-// JSON MIDDLEWARE
-// ========================================
+app.use(
+  cors({
+    origin: [
+      "https://nethrakannan.github.io",
+      "http://localhost:3000",
+      "http://127.0.0.1:3000"
+    ],
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type"]
+  })
+);
 
 app.use(express.json({ limit: "10kb" }));
 
-// ========================================
-// DATABASE
-// ========================================
+// Basic security headers
+app.use((req, res, next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  next();
+});
+
+// Basic request logging
+app.use((req, res, next) => {
+  console.log(
+    `${new Date().toISOString()} - ${req.method} ${req.originalUrl}`
+  );
+  next();
+});
+
+// -------------------- DATABASE --------------------
+
+const db = new Database("internships.db");
+
+db.pragma("journal_mode = WAL");
 
 db.exec(`
-CREATE TABLE IF NOT EXISTS internships (
+  CREATE TABLE IF NOT EXISTS internships (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     company TEXT NOT NULL,
     role TEXT NOT NULL,
     location TEXT NOT NULL,
-    stipend INTEGER DEFAULT 0,
+    stipend INTEGER NOT NULL DEFAULT 0,
     duration TEXT NOT NULL
-);
-`);
+  );
 
-// Application table
-db.exec(`
-CREATE TABLE IF NOT EXISTS applications (
+  CREATE TABLE IF NOT EXISTS applications (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    internship_id INTEGER NOT NULL,
+    internshipId INTEGER NOT NULL,
     name TEXT NOT NULL,
     email TEXT NOT NULL,
     phone TEXT NOT NULL,
     reason TEXT NOT NULL,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (internship_id) REFERENCES internships(id)
-);
+    createdAt TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (internshipId) REFERENCES internships(id)
+  );
 `);
 
-// ========================================
-// SAMPLE INTERNSHIP DATA
-// ========================================
+// Seed internships only when the table is empty
+const internshipCount = db
+  .prepare("SELECT COUNT(*) AS count FROM internships")
+  .get().count;
 
-const count = db.prepare(
-    "SELECT COUNT(*) AS total FROM internships"
-).get();
+if (internshipCount === 0) {
+  const insertInternship = db.prepare(`
+    INSERT INTO internships (company, role, location, stipend, duration)
+    VALUES (?, ?, ?, ?, ?)
+  `);
 
-if (count.total === 0) {
-    const insert = db.prepare(`
-        INSERT INTO internships
-        (company, role, location, stipend, duration)
-        VALUES (?, ?, ?, ?, ?)
-    `);
+  const seedInternships = [
+    ["ABC Technologies", "Web Developer", "Remote", 5000, "1 month"],
+    ["XYZ Solutions", "Frontend Developer", "Remote", 8000, "2 months"],
+    ["Tech India", "Data Analyst", "Chennai", 6000, "3 months"]
+  ];
 
-    insert.run(
-        "ABC Technologies",
-        "Web Developer",
-        "Remote",
-        5000,
-        "1 month"
-    );
+  const insertMany = db.transaction((internships) => {
+    for (const internship of internships) {
+      insertInternship.run(...internship);
+    }
+  });
 
-    insert.run(
-        "XYZ Solutions",
-        "Frontend Developer",
-        "Remote",
-        8000,
-        "2 months"
-    );
-
-    insert.run(
-        "Tech India",
-        "Data Analyst",
-        "Chennai",
-        6000,
-        "3 months"
-    );
+  insertMany(seedInternships);
 }
 
-// ========================================
-// VALIDATE INTERNSHIP INPUT
-// ========================================
+// -------------------- HEALTH CHECK --------------------
 
-function validateInternship(data) {
-    if (!data || typeof data !== "object" || Array.isArray(data)) {
-        return "Invalid request data";
-    }
+app.get("/api/health", (req, res) => {
+  try {
+    db.prepare("SELECT 1").get();
 
-    for (const field of ["company", "role", "location", "duration"]) {
-        if (
-            typeof data[field] !== "string" ||
-            !data[field].trim()
-        ) {
-            return field + " is required";
-        }
-    }
-
-    if (
-        data.stipend !== undefined &&
-        (
-            !Number.isInteger(data.stipend) ||
-            data.stipend < 0
-        )
-    ) {
-        return "Stipend must be a non-negative integer";
-    }
-
-    return null;
-}
-
-// ========================================
-// GET: LIST INTERNSHIPS
-// ========================================
-
-app.get("/api/internships", (req, res) => {
-    const page = Number(req.query.page || 1);
-    const limit = Number(req.query.limit || 10);
-
-    if (
-        !Number.isInteger(page) ||
-        !Number.isInteger(limit) ||
-        page < 1 ||
-        limit < 1 ||
-        limit > 100
-    ) {
-        return res.status(400).json({
-            success: false,
-            error: "Invalid page or limit"
-        });
-    }
-
-    const records = db.prepare(`
-        SELECT * FROM internships
-        LIMIT ? OFFSET ?
-    `).all(limit, (page - 1) * limit);
-
-    const total = db.prepare(
-        "SELECT COUNT(*) AS total FROM internships"
-    ).get().total;
-
-    res.json({
-        success: true,
-        data: records,
-        pagination: {
-            page,
-            limit,
-            total,
-            totalPages: Math.ceil(total / limit)
-        }
+    res.status(200).json({
+      success: true,
+      status: "healthy",
+      timestamp: new Date().toISOString()
     });
-});
-
-// ========================================
-// GET: VIEW ONE INTERNSHIP
-// ========================================
-
-app.get("/api/internships/:id", (req, res) => {
-    const id = Number(req.params.id);
-
-    if (!Number.isInteger(id) || id < 1) {
-        return res.status(400).json({
-            success: false,
-            error: "Invalid internship ID"
-        });
-    }
-
-    const record = db.prepare(
-        "SELECT * FROM internships WHERE id = ?"
-    ).get(id);
-
-    if (!record) {
-        return res.status(404).json({
-            success: false,
-            error: "Internship not found"
-        });
-    }
-
-    res.json({
-        success: true,
-        data: record
-    });
-});
-
-// ========================================
-// POST: CREATE INTERNSHIP
-// ========================================
-
-app.post("/api/internships", (req, res) => {
-    const error = validateInternship(req.body);
-
-    if (error) {
-        return res.status(400).json({
-            success: false,
-            error
-        });
-    }
-
-    const {
-        company,
-        role,
-        location,
-        stipend = 0,
-        duration
-    } = req.body;
-
-    const result = db.prepare(`
-        INSERT INTO internships
-        (company, role, location, stipend, duration)
-        VALUES (?, ?, ?, ?, ?)
-    `).run(
-        company.trim(),
-        role.trim(),
-        location.trim(),
-        stipend,
-        duration.trim()
-    );
-
-    const record = db.prepare(
-        "SELECT * FROM internships WHERE id = ?"
-    ).get(result.lastInsertRowid);
-
-    res.status(201).json({
-        success: true,
-        data: record
-    });
-});
-
-// ========================================
-// PUT: UPDATE INTERNSHIP
-// ========================================
-
-app.put("/api/internships/:id", (req, res) => {
-    const id = Number(req.params.id);
-
-    if (!Number.isInteger(id) || id < 1) {
-        return res.status(400).json({
-            success: false,
-            error: "Invalid internship ID"
-        });
-    }
-
-    const error = validateInternship(req.body);
-
-    if (error) {
-        return res.status(400).json({
-            success: false,
-            error
-        });
-    }
-
-    const {
-        company,
-        role,
-        location,
-        stipend = 0,
-        duration
-    } = req.body;
-
-    const result = db.prepare(`
-        UPDATE internships
-        SET company = ?,
-            role = ?,
-            location = ?,
-            stipend = ?,
-            duration = ?
-        WHERE id = ?
-    `).run(
-        company.trim(),
-        role.trim(),
-        location.trim(),
-        stipend,
-        duration.trim(),
-        id
-    );
-
-    if (result.changes === 0) {
-        return res.status(404).json({
-            success: false,
-            error: "Internship not found"
-        });
-    }
-
-    const record = db.prepare(
-        "SELECT * FROM internships WHERE id = ?"
-    ).get(id);
-
-    res.json({
-        success: true,
-        data: record
-    });
-});
-
-// ========================================
-// DELETE: REMOVE INTERNSHIP
-// ========================================
-
-app.delete("/api/internships/:id", (req, res) => {
-    const id = Number(req.params.id);
-
-    if (!Number.isInteger(id) || id < 1) {
-        return res.status(400).json({
-            success: false,
-            error: "Invalid internship ID"
-        });
-    }
-
-    const result = db.prepare(
-        "DELETE FROM internships WHERE id = ?"
-    ).run(id);
-
-    if (result.changes === 0) {
-        return res.status(404).json({
-            success: false,
-            error: "Internship not found"
-        });
-    }
-
-    res.json({
-        success: true,
-        message: "Internship deleted successfully"
-    });
-});
-
-// ========================================
-// POST: SUBMIT INTERNSHIP APPLICATION
-// ========================================
-
-app.post("/api/applications", (req, res) => {
-    const {
-        internshipId,
-        name,
-        email,
-        phone,
-        reason
-    } = req.body || {};
-
-    if (
-        !Number.isInteger(internshipId) ||
-        internshipId < 1
-    ) {
-        return res.status(400).json({
-            success: false,
-            error: "Valid internship ID is required"
-        });
-    }
-
-    if (
-        typeof name !== "string" ||
-        name.trim().length < 2 ||
-        name.trim().length > 100
-    ) {
-        return res.status(400).json({
-            success: false,
-            error: "Name must contain 2 to 100 characters"
-        });
-    }
-
-    if (
-        typeof email !== "string" ||
-        !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
-    ) {
-        return res.status(400).json({
-            success: false,
-            error: "Enter a valid email address"
-        });
-    }
-
-    if (
-        typeof phone !== "string" ||
-        !/^[0-9]{10,15}$/.test(phone)
-    ) {
-        return res.status(400).json({
-            success: false,
-            error: "Phone must contain 10 to 15 digits"
-        });
-    }
-
-    if (
-        typeof reason !== "string" ||
-        reason.trim().length < 10 ||
-        reason.trim().length > 1000
-    ) {
-        return res.status(400).json({
-            success: false,
-            error: "Reason must contain 10 to 1000 characters"
-        });
-    }
-
-    const internship = db.prepare(
-        "SELECT id FROM internships WHERE id = ?"
-    ).get(internshipId);
-
-    if (!internship) {
-        return res.status(404).json({
-            success: false,
-            error: "Internship not found"
-        });
-    }
-
-    const result = db.prepare(`
-        INSERT INTO applications
-        (internship_id, name, email, phone, reason)
-        VALUES (?, ?, ?, ?, ?)
-    `).run(
-        internshipId,
-        name.trim(),
-        email.trim().toLowerCase(),
-        phone,
-        reason.trim()
-    );
-
-    res.status(201).json({
-        success: true,
-        message: "Application submitted successfully",
-        applicationId: result.lastInsertRowid
-    });
-});
-
-// ========================================
-// HANDLE UNKNOWN ROUTES
-// ========================================
-
-app.use((req, res) => {
-    res.status(404).json({
-        success: false,
-        error: "Route not found"
-    });
-});
-
-// ========================================
-// ERROR HANDLING
-// ========================================
-
-app.use((err, req, res, next) => {
-    if (err.type === "entity.too.large") {
-        return res.status(413).json({
-            success: false,
-            error: "Request body is too large"
-        });
-    }
-
-    if (err instanceof SyntaxError && err.status === 400) {
-        return res.status(400).json({
-            success: false,
-            error: "Invalid JSON data"
-        });
-    }
-
-    console.error(err.message);
+  } catch (error) {
+    console.error("Health check failed:", error.message);
 
     res.status(500).json({
-        success: false,
-        error: "Internal server error"
+      success: false,
+      status: "unhealthy"
     });
+  }
 });
 
-// ========================================
-// START SERVER
-// ========================================
+// -------------------- INTERNSHIP ROUTES --------------------
 
-app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
+// Get all internships with pagination
+app.get("/api/internships", (req, res) => {
+  try {
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const limit = Math.min(
+      Math.max(parseInt(req.query.limit, 10) || 10, 1),
+      100
+    );
+
+    const offset = (page - 1) * limit;
+
+    const internships = db
+      .prepare(
+        `SELECT * FROM internships
+         ORDER BY id ASC
+         LIMIT ? OFFSET ?`
+      )
+      .all(limit, offset);
+
+    const total = db
+      .prepare("SELECT COUNT(*) AS count FROM internships")
+      .get().count;
+
+    res.json({
+      success: true,
+      data: internships,
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit)
+      }
+    });
+  } catch (error) {
+    console.error("Failed to get internships:", error.message);
+
+    res.status(500).json({
+      success: false,
+      error: "Failed to retrieve internships"
+    });
+  }
+});
+
+// Get one internship
+app.get("/api/internships/:id", (req, res) => {
+  try {
+    const id = Number(req.params.id);
+
+    if (!Number.isInteger(id) || id <= 0) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid internship ID"
+      });
+    }
+
+    const internship = db
+      .prepare("SELECT * FROM internships WHERE id = ?")
+      .get(id);
+
+    if (!internship) {
+      return res.status(404).json({
+        success: false,
+        error: "Internship not found"
+      });
+    }
+
+    res.json({
+      success: true,
+      data: internship
+    });
+  } catch (error) {
+    console.error("Failed to get internship:", error.message);
+
+    res.status(500).json({
+      success: false,
+      error: "Failed to retrieve internship"
+    });
+  }
+});
+
+// Create an internship
+app.post("/api/internships", (req, res) => {
+  try {
+    const { company, role, location, stipend, duration } = req.body;
+
+    if (
+      !company ||
+      !role ||
+      !location ||
+      stipend === undefined ||
+      !duration
+    ) {
+      return res.status(400).json({
+        success: false,
+        error: "All internship fields are required"
+      });
+    }
+
+    const stipendValue = Number(stipend);
+
+    if (!Number.isFinite(stipendValue) || stipendValue < 0) {
+      return res.status(400).json({
+        success: false,
+        error: "Stipend must be a valid non-negative number"
+      });
+    }
+
+    const result = db
+      .prepare(
+        `INSERT INTO internships (company, role, location, stipend, duration)
+         VALUES (?, ?, ?, ?, ?)`
+      )
+      .run(
+        String(company).trim(),
+        String(role).trim(),
+        String(location).trim(),
+        stipendValue,
+        String(duration).trim()
+      );
+
+    const createdInternship = db
+      .prepare("SELECT * FROM internships WHERE id = ?")
+      .get(result.lastInsertRowid);
+
+    res.status(201).json({
+      success: true,
+      message: "Internship created successfully",
+      data: createdInternship
+    });
+  } catch (error) {
+    console.error("Failed to create internship:", error.message);
+
+    res.status(500).json({
+      success: false,
+      error: "Failed to create internship"
+    });
+  }
+});
+
+// Update an internship
+app.put("/api/internships/:id", (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const { company, role, location, stipend, duration } = req.body;
+
+    if (!Number.isInteger(id) || id <= 0) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid internship ID"
+      });
+    }
+
+    if (
+      !company ||
+      !role ||
+      !location ||
+      stipend === undefined ||
+      !duration
+    ) {
+      return res.status(400).json({
+        success: false,
+        error: "All internship fields are required"
+      });
+    }
+
+    const stipendValue = Number(stipend);
+
+    if (!Number.isFinite(stipendValue) || stipendValue < 0) {
+      return res.status(400).json({
+        success: false,
+        error: "Stipend must be a valid non-negative number"
+      });
+    }
+
+    const result = db
+      .prepare(
+        `UPDATE internships
+         SET company = ?, role = ?, location = ?, stipend = ?, duration = ?
+         WHERE id = ?`
+      )
+      .run(
+        String(company).trim(),
+        String(role).trim(),
+        String(location).trim(),
+        stipendValue,
+        String(duration).trim(),
+        id
+      );
+
+    if (result.changes === 0) {
+      return res.status(404).json({
+        success: false,
+        error: "Internship not found"
+      });
+    }
+
+    const updatedInternship = db
+      .prepare("SELECT * FROM internships WHERE id = ?")
+      .get(id);
+
+    res.json({
+      success: true,
+      message: "Internship updated successfully",
+      data: updatedInternship
+    });
+  } catch (error) {
+    console.error("Failed to update internship:", error.message);
+
+    res.status(500).json({
+      success: false,
+      error: "Failed to update internship"
+    });
+  }
+});
+
+// Delete an internship
+app.delete("/api/internships/:id", (req, res) => {
+  try {
+    const id = Number(req.params.id);
+
+    if (!Number.isInteger(id) || id <= 0) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid internship ID"
+      });
+    }
+
+    const result = db
+      .prepare("DELETE FROM internships WHERE id = ?")
+      .run(id);
+
+    if (result.changes === 0) {
+      return res.status(404).json({
+        success: false,
+        error: "Internship not found"
+      });
+    }
+
+    res.json({
+      success: true,
+      message: "Internship deleted successfully"
+    });
+  } catch (error) {
+    console.error("Failed to delete internship:", error.message);
+
+    res.status(500).json({
+      success: false,
+      error: "Failed to delete internship"
+    });
+  }
+});
+
+// -------------------- APPLICATION ROUTE --------------------
+
+app.post("/api/applications", (req, res) => {
+  try {
+    const { internshipId, name, email, phone, reason } = req.body;
+
+    if (
+      internshipId === undefined ||
+      !name ||
+      !email ||
+      !phone ||
+      !reason
+    ) {
+      return res.status(400).json({
+        success: false,
+        error: "All application fields are required"
+      });
+    }
+
+    const id = Number(internshipId);
+
+    if (!Number.isInteger(id) || id <= 0) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid internship ID"
+      });
+    }
+
+    const emailValue = String(email).trim();
+
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailValue)) {
+      return res.status(400).json({
+        success: false,
+        error: "Please enter a valid email address"
+      });
+    }
+
+    const internship = db
+      .prepare("SELECT id FROM internships WHERE id = ?")
+      .get(id);
+
+    if (!internship) {
+      return res.status(404).json({
+        success: false,
+        error: "The selected internship was not found"
+      });
+    }
+
+    const result = db
+      .prepare(
+        `INSERT INTO applications
+         (internshipId, name, email, phone, reason)
+         VALUES (?, ?, ?, ?, ?)`
+      )
+      .run(
+        id,
+        String(name).trim(),
+        emailValue,
+        String(phone).trim(),
+        String(reason).trim()
+      );
+
+    res.status(201).json({
+      success: true,
+      message: "Application submitted successfully",
+      applicationId: result.lastInsertRowid
+    });
+  } catch (error) {
+    console.error("Failed to submit application:", error.message);
+
+    res.status(500).json({
+      success: false,
+      error: "Failed to submit application"
+    });
+  }
+});
+
+// -------------------- 404 AND ERROR HANDLING --------------------
+
+// Keep this AFTER all API routes
+app.use((req, res) => {
+  res.status(404).json({
+    success: false,
+    error: "Route not found"
+  });
+});
+
+// Handle unexpected errors
+app.use((error, req, res, next) => {
+  console.error("Unexpected server error:", error.message);
+
+  res.status(500).json({
+    success: false,
+    error: "Internal server error"
+  });
+});
+
+// -------------------- START SERVER --------------------
+
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`Internship API is running on port ${PORT}`);
 });
